@@ -9,4 +9,6 @@ on [SemVer](https://semver.org/).
 - `vmware/Deploy-NsVpx.ps1`: NetScaler VPX on a standalone ESXi host with PowerCLI - OVF import, first-boot userdata
   ISO, management key pinned on first contact, forced nsroot change via NITRO, CallHome / MBF off, `-Cleanup`,
   `-ListOvf`, `-InitNsroot`, `-WhatIf`, `-NicType E1000|Vmxnet3`, `-MacAddress`, `-EsxPinnedPublicKey`.
-  Standalone (built-in pinned NITRO client). Validated on 14.1 build 73.46 with E1000 and VMXNET3, 2 NICs.
+  Standalone (built-in pinned NITRO client). Validated on 14.1 build 73.46 with E1000 and VMXNET3, 1 and 2 NICs.
+- Userdata ISO removed automatically at the end of a successful run; kept on failure, with `-SkipNsroot` and with
+  the new `-KeepIso` (the run prints the `-Cleanup` command).

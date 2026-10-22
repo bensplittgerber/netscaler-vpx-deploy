@@ -16,8 +16,10 @@
          logs in with the image's default password + new_password (the forced first-login change), optional RPC
          node password, disables -DisableFeature / -DisableMode (default: CH, MBF - the same lines in the
          userdata do not stick), save ns config
-    -Cleanup (after the first boot): ejects the userdata ISO (or removes the CD drive if the VM is off) and deletes
-    it from the datastore. -InitNsroot: step 4 only, against a running VPX. -ListOvf: lists OVFs on all datastores.
+      5. removes the userdata ISO (eject + delete from the datastore) - only after step 4 succeeded. Kept on any
+         failure, with -SkipNsroot and with -KeepIso; the run then prints the -Cleanup command.
+    -Cleanup: ejects the userdata ISO (or removes the CD drive if the VM is off) and deletes it from the datastore.
+    -InitNsroot: step 4 only, against a running VPX. -ListOvf: lists OVFs on all datastores.
 
     Prompts (masked, all at the start so the run is unattended): ESXi login; nsroot default password of the image,
     new nsroot password (twice); RPC password with -SetRpcPassword. Passwords stay in memory (SecureString, plain only
@@ -83,6 +85,7 @@ param(
     [Parameter(ParameterSetName = 'Deploy')][string[]]$MacAddress,
 
     [Parameter(ParameterSetName = 'Deploy')][switch]$SkipNsroot,           # leave the password change to the first login
+    [Parameter(ParameterSetName = 'Deploy')][switch]$KeepIso,              # do not remove the userdata ISO after a successful run
     [Parameter(ParameterSetName = 'Deploy')]
     [Parameter(ParameterSetName = 'InitNsroot')][switch]$SetRpcPassword,   # HA: the same RPC password on both nodes
     [Parameter(ParameterSetName = 'Deploy')]
@@ -347,6 +350,39 @@ function Initialize-Nsroot([string]$Ip, [hashtable]$Secrets) {
     $pin
 }
 
+function Remove-UserdataIso {
+    # needs the VI connection and the ds: drive; uses $VmName / $isoName of the script
+    $vm = Get-VM $VmName
+    $cd = Get-CDDrive -VM $vm | Where-Object IsoPath -like "*$isoName"
+    if ($cd -and $vm.PowerState -eq 'PoweredOn') {
+        # IDE CD drives cannot be hot-removed -> eject the ISO; the empty drive stays (harmless)
+        # vSphere API directly (Set-CDDrive has no -RunAsync): reconfigure task = CD without media, not connected
+        $dev = $cd.ExtensionData
+        $dev.Backing = New-Object VMware.Vim.VirtualCdromRemotePassthroughBackingInfo -Property @{ DeviceName = ''; Exclusive = $false }
+        $dev.Connectable.Connected = $false
+        $dev.Connectable.StartConnected = $false
+        $spec = New-Object VMware.Vim.VirtualMachineConfigSpec
+        $spec.DeviceChange = @(New-Object VMware.Vim.VirtualDeviceConfigSpec -Property @{ Operation = 'edit'; Device = $dev })
+        $taskRef = $vm.ExtensionData.ReconfigVM_Task($spec)
+        # FreeBSD may lock the tray -> ESXi asks "override the lock?" -> answer Yes while the task waits
+        $deadline = (Get-Date).AddMinutes(2)
+        while (($t = Get-View $taskRef).Info.State -in 'queued', 'running') {
+            Get-VMQuestion -VM $vm | ForEach-Object {
+                $yes = $_.Options | Where-Object Label -match 'yes' | Select-Object -First 1
+                if ($yes) { Write-Host "VM question: $($_.Text) -> $($yes.Summary)"; Set-VMQuestion $_ -Option $yes -Confirm:$false }
+            }
+            if ((Get-Date) -gt $deadline) { throw 'CD eject task still running after 2 min - check the VM in the ESXi host client.' }
+            Start-Sleep 2
+        }
+        if ($t.Info.State -ne 'success') { throw "CD eject failed: $($t.Info.Error.LocalizedMessage)" }
+        Write-Host 'ISO ejected (empty CD drive stays while the VM runs).' -ForegroundColor Green
+    } elseif ($cd) {
+        Remove-CDDrive $cd -Confirm:$false
+        Write-Host 'CD drive removed.' -ForegroundColor Green
+    }
+    if (Test-Path "ds:\$VmName\$isoName") { Remove-Item "ds:\$VmName\$isoName"; Write-Host "$isoName deleted from the datastore." -ForegroundColor Green }
+}
+
 if ($InitNsroot) {
     if ($dryRun) { Write-Host "WhatIf: would log in to https://$Nsip as nsroot and change the password via NITRO." -ForegroundColor Yellow; return }
     [void](Initialize-Nsroot -Ip $Nsip -Secrets (Read-NsrootSecrets -Existing))
@@ -386,36 +422,8 @@ try {
     New-PSDrive -Name ds -PSProvider VimDatastore -Root '\' -Location $ds | Out-Null
 
     if ($Cleanup) {
-        $vm = Get-VM $VmName
-        $cd = Get-CDDrive -VM $vm | Where-Object IsoPath -like "*$isoName"
         if ($dryRun) { Write-Host "WhatIf: would eject/remove $isoName from $VmName and delete it from $Datastore." -ForegroundColor Yellow; return }
-        if ($cd -and $vm.PowerState -eq 'PoweredOn') {
-            # IDE CD drives cannot be hot-removed -> eject the ISO; the empty drive stays (harmless)
-            # vSphere API directly (Set-CDDrive has no -RunAsync): reconfigure task = CD without media, not connected
-            $dev = $cd.ExtensionData
-            $dev.Backing = New-Object VMware.Vim.VirtualCdromRemotePassthroughBackingInfo -Property @{ DeviceName = ''; Exclusive = $false }
-            $dev.Connectable.Connected = $false
-            $dev.Connectable.StartConnected = $false
-            $spec = New-Object VMware.Vim.VirtualMachineConfigSpec
-            $spec.DeviceChange = @(New-Object VMware.Vim.VirtualDeviceConfigSpec -Property @{ Operation = 'edit'; Device = $dev })
-            $taskRef = $vm.ExtensionData.ReconfigVM_Task($spec)
-            # FreeBSD may lock the tray -> ESXi asks "override the lock?" -> answer Yes while the task waits
-            $deadline = (Get-Date).AddMinutes(2)
-            while (($t = Get-View $taskRef).Info.State -in 'queued', 'running') {
-                Get-VMQuestion -VM $vm | ForEach-Object {
-                    $yes = $_.Options | Where-Object Label -match 'yes' | Select-Object -First 1
-                    if ($yes) { Write-Host "VM question: $($_.Text) -> $($yes.Summary)"; Set-VMQuestion $_ -Option $yes -Confirm:$false }
-                }
-                if ((Get-Date) -gt $deadline) { throw 'CD eject task still running after 2 min - check the VM in the ESXi host client.' }
-                Start-Sleep 2
-            }
-            if ($t.Info.State -ne 'success') { throw "CD eject failed: $($t.Info.Error.LocalizedMessage)" }
-            Write-Host 'ISO ejected (empty CD drive stays while the VM runs).' -ForegroundColor Green
-        } elseif ($cd) {
-            Remove-CDDrive $cd -Confirm:$false
-            Write-Host 'CD drive removed.' -ForegroundColor Green
-        }
-        if (Test-Path "ds:\$VmName\$isoName") { Remove-Item "ds:\$VmName\$isoName"; Write-Host "$isoName deleted from the datastore." -ForegroundColor Green }
+        Remove-UserdataIso
         return
     }
 
@@ -467,7 +475,7 @@ $(($cfg | ForEach-Object { "        $_" }) -join "`n")
 </NS-PRE-BOOT-CONFIG>
 "@
     Write-Host "userdata:`n$userdata" -ForegroundColor DarkGray
-    if ($dryRun) { Write-Host "WhatIf: would import $OvfPath as $VmName on $Datastore ($NumCpu vCPU, $MemoryGB GB, $NicCount NIC(s)$(if ($NicType) { " $NicType" }) on $Network), attach $isoName, power on$(if (-not $SkipNsroot) { ", change the nsroot password via NITRO" })." -ForegroundColor Yellow; return }
+    if ($dryRun) { Write-Host "WhatIf: would import $OvfPath as $VmName on $Datastore ($NumCpu vCPU, $MemoryGB GB, $NicCount NIC(s)$(if ($NicType) { " $NicType" }) on $Network), attach $isoName, power on$(if (-not $SkipNsroot) { ", change the nsroot password via NITRO$(if (-not $KeepIso) { ', remove the ISO' })" })." -ForegroundColor Yellow; return }
     $secrets = if (-not $SkipNsroot) { Read-NsrootSecrets }
 
     $work = Join-Path ([IO.Path]::GetTempPath()) "nsvpx-$(Get-Date -f yyyyMMddHHmmss)"
@@ -511,18 +519,36 @@ $(($cfg | ForEach-Object { "        $_" }) -join "`n")
         $mac = @(Get-NetworkAdapter -VM $vm | Sort-Object Name | ForEach-Object MacAddress)
         if ($MacAddress -and (Compare-Object $mac $MacAddress -SyncWindow 0)) { Write-Warning "VM runs with MAC $($mac -join ', '), expected $($MacAddress -join ', ')." }
         Write-Host "$VmName powered on (MAC $($mac -join ', ')). Waiting for $Nsip`:443 (first boot takes a few minutes) ..." -ForegroundColor Cyan
-        $deadline = (Get-Date).AddMinutes(15)
-        while (-not (Test-Connection $Nsip -TcpPort 443 -Quiet)) {
-            if ((Get-Date) -gt $deadline) { throw "$Nsip`:443 not reachable after 15 min - check the VM console in the ESXi host client." }
-            Start-Sleep 15
+        $cleanupCmd = "& '$PSCommandPath' -EsxHost $EsxHost$(if ($EsxPinnedPublicKey) { " -EsxPinnedPublicKey '$EsxPinnedPublicKey'" }) -VmName $VmName -Datastore $Datastore -Cleanup"
+        try {
+            $deadline = (Get-Date).AddMinutes(15)
+            while (-not (Test-Connection $Nsip -TcpPort 443 -Quiet)) {
+                if ((Get-Date) -gt $deadline) { throw "$Nsip`:443 not reachable after 15 min - check the VM console in the ESXi host client." }
+                Start-Sleep 15
+            }
+            if ($secrets) {
+                Write-Host "$Nsip`:443 is up. nsroot password via NITRO ..." -ForegroundColor Cyan
+                $pin = Initialize-Nsroot -Ip $Nsip -Secrets $secrets
+            }
         }
-        if ($secrets) {
-            Write-Host "$Nsip`:443 is up. nsroot password via NITRO ..." -ForegroundColor Cyan
-            $pin = Initialize-Nsroot -Ip $Nsip -Secrets $secrets
-            Write-Host "Done. Next: -Cleanup. Management key pin for the next NITRO tools: $pin" -ForegroundColor Green
+        catch {
+            # first boot not confirmed -> keep the userdata ISO for diagnosis
+            Write-Host "Userdata ISO kept for diagnosis. Remove it later with:`n  $cleanupCmd" -ForegroundColor Yellow
+            throw
+        }
+        if (-not $secrets) {
+            # -SkipNsroot: the first boot is not confirmed by a login -> keep the ISO
+            Write-Host "$Nsip`:443 is up. Change the nsroot password (first login or -InitNsroot), then:`n  $cleanupCmd" -ForegroundColor Green
+            return
+        }
+        # the NITRO login proved the first boot applied the userdata -> the ISO has done its job
+        if ($KeepIso) {
+            Write-Host "Userdata ISO kept (-KeepIso). Remove it later with:`n  $cleanupCmd" -ForegroundColor Yellow
         } else {
-            Write-Host "$Nsip`:443 is up. Change the nsroot password (first login or -InitNsroot), then -Cleanup." -ForegroundColor Green
+            try   { Remove-UserdataIso }
+            catch { Write-Warning "VPX is ready, but the userdata ISO was not removed: $($_.Exception.Message)`n  Retry with: $cleanupCmd" }
         }
+        Write-Host "Done. Management key pin for the next NITRO tools: $pin" -ForegroundColor Green
     }
     finally { Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue }
 }

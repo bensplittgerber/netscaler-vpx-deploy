@@ -26,6 +26,9 @@ configuration (CLI, GUI or NITRO tooling). The script is standalone: no other fi
    `sha256//...`), logs in with the image's default nsroot password and a new one (the forced first-login
    change), optionally sets the RPC node password, disables `-DisableFeature` (default `CH`) and `-DisableMode`
    (default `MBF`) and saves the config.
+5. Removes the userdata ISO (eject, delete from the datastore) once step 4 has succeeded: the NITRO login proves the
+   first boot applied it. The ISO is **kept** for diagnosis if anything fails (443 timeout, NITRO error), with
+   `-SkipNsroot` (first boot not confirmed) and with `-KeepIso`; the run then prints the `-Cleanup` command.
 
 All passwords are prompted masked at the start (ESXi login, image default nsroot password, new nsroot password
 twice, RPC password with `-SetRpcPassword`), so the run is unattended afterwards. They stay in memory; nothing goes
@@ -42,9 +45,9 @@ into the ISO, a file or a command line.
     -VmName ns01 -Datastore datastore1 -Nsip 192.0.2.10 -Gateway 192.0.2.1 -Snip 192.0.2.11 `
     -DnsServer 192.0.2.53 -NtpServer 192.0.2.123 -EsxPinnedPublicKey 'sha256//...' -NoProxy -WhatIf
 
-# deploy (same line without -WhatIf)
+# deploy (same line without -WhatIf); removes the userdata ISO at the end
 
-# after the first boot: eject + delete the userdata ISO (VM may keep running)
+# only after a failed run, -SkipNsroot or -KeepIso: eject + delete the userdata ISO (VM may keep running)
 ./vmware/Deploy-NsVpx.ps1 -EsxHost esx01.example.org -VmName ns01 -Datastore datastore1 -Cleanup
 ```
 
@@ -78,13 +81,15 @@ support key pinning can use it until the management certificate is replaced.
 | `-NumCpu`, `-MemoryGB`, `-NicCount` | 2, 2, 1 | VM size; NICs 0/1, 1/1, 1/2, ... all on `-Network` |
 | `-NicType` | as in the OVF (E1000) | `Vmxnet3` or `E1000` for all NICs (VMXNET3: paravirtual, less host CPU) |
 | `-MacAddress` | ESXi generated | one MAC per NIC, e.g. to keep the MAC of a rebuilt VM (DHCP, firewall, NAT entries) |
-| `-SkipNsroot` | off | no password change; do it at the first login or later with `-InitNsroot` |
+| `-SkipNsroot` | off | no password change; do it at the first login or later with `-InitNsroot` (ISO is kept) |
+| `-KeepIso` | off | keep the userdata ISO after a successful run (remove it later with `-Cleanup`) |
 | `-SetRpcPassword` | off | also prompt for an RPC node password (must be the same on both HA nodes) |
 | `-DisableFeature`, `-DisableMode` | `CH`, `MBF` | switched off after boot; `@()` leaves them as they are |
 | `-NoProxy` | off | NITRO calls bypass the system proxy |
 | `-WhatIf` | off | dry run: checks + userdata only |
 
-Other modes: `-ListOvf` (OVFs on all datastores), `-Cleanup` (userdata ISO off the VM and the datastore),
+Other modes: `-ListOvf` (OVFs on all datastores), `-Cleanup` (userdata ISO off the VM and the datastore, for the
+cases where the deploy kept it),
 `-InitNsroot -Nsip ...` (only step 4 against a running VPX, asks for the current and an optional new password).
 
 ## Notes
@@ -108,5 +113,7 @@ Other modes: `-ListOvf` (OVFs on all datastores), `-Cleanup` (userdata ISO off t
   The value changes when the host certificate is renewed.
 - The ESXi banner "configured guest OS (FreeBSD (64-bit)) ... does not match ... FreeBSD 11 (64-bit)" is cosmetic:
   the OVF's hardware version (ESXi 6.5, vmx-13) has no FreeBSD 11 entry, so the script leaves the guest OS as is.
-- IDE CD drives cannot be removed from a running VM, so `-Cleanup` ejects the ISO and leaves the empty drive. If
-  ESXi asks to override the guest's tray lock, the script answers Yes.
+- IDE CD drives cannot be removed from a running VM, so the ISO is ejected and the empty drive stays. If ESXi asks
+  to override the guest's tray lock, the script answers Yes. If the automatic removal fails, the VPX is still ready:
+  the run warns and prints the `-Cleanup` command.
+- Snapshots: take them after the ISO is gone, otherwise a revert asks for the deleted ISO.
