@@ -11,4 +11,4 @@ on [SemVer](https://semver.org/).
   `-ListOvf`, `-InitNsroot`, `-WhatIf`, `-NicType E1000|Vmxnet3`, `-MacAddress`, `-EsxPinnedPublicKey`.
   Standalone (built-in pinned NITRO client). Validated on 14.1 build 73.46 with E1000 and VMXNET3, 1 and 2 NICs.
 - Userdata ISO removed automatically at the end of a successful run; kept on failure, with `-SkipNsroot` and with
-  the new `-KeepIso` (the run prints the `-Cleanup` command).
+  the new `-KeepIso` (the run prints the `-Cleanup` command). Validated on a real deploy (14.1-73.46, VMXNET3).
