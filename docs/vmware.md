@@ -54,6 +54,29 @@ into the ISO, a file or a command line.
 The deploy prints the management key pin (`sha256//...`, same format as `curl --pinnedpubkey`); NITRO tools that
 support key pinning can use it until the management certificate is replaced.
 
+## Screenshots
+
+Lab run on 14.1 build 73.46 (names, addresses, MACs and pins replaced with placeholders).
+
+**Dry run** (`-WhatIf`): ESXi key check, the userdata that goes into the ISO, what the real run would do.
+
+![Dry run](images/vmware-1-dry-run.png)
+
+**First boot**: the VPX boots with the userdata ISO (ESXi Host Client console) while the script waits for 443.
+
+![First boot](images/vmware-2-first-boot.png)
+
+**NICs and NITRO**: two VMXNET3 adapters (`-NicCount 2 -NicType Vmxnet3`), then the key pinned on first contact, the
+forced nsroot change (the first NITRO contact is retried while NITRO starts), CallHome / MBF off and the save.
+
+![VMXNET3 NICs and the NITRO steps](images/vmware-3-nics-and-nitro.png)
+
+**Afterwards** (optional next step): the management certificate replaced with a CA-signed one (see Next steps). The
+VPX was deployed without a SNIP, as an HA secondary-to-be: the setup wizard shows "Subnet IP Address - Not
+configured".
+
+![GUI with a CA-signed management certificate](images/vmware-4-gui-mgmt-cert.png)
+
 ## Next steps
 
 1. Fresh 14.1 VPX: enable the default SSL profile before creating SSL vservers

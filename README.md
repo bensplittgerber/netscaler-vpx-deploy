@@ -23,7 +23,9 @@ Install-Module VCF.PowerCLI -Scope CurrentUser        # once
 The userdata ISO is removed at the end of a successful run; after a failure it is kept for diagnosis and the run
 prints the `-Cleanup` command.
 
-What it does, all parameters and notes: [docs/vmware.md](docs/vmware.md).
+What it does, all parameters, notes and screenshots: [docs/vmware.md](docs/vmware.md).
+
+![First boot: ESXi console and the deploy script waiting for the NSIP](docs/images/vmware-2-first-boot.png)
 
 In short:
 - OVF import with PowerCLI (thin), vCPU / memory / NIC count and type (E1000 or VMXNET3), optional static MACs
