@@ -3,7 +3,11 @@
 All notable changes to this project. Format based on [Keep a Changelog](https://keepachangelog.com/), versioning based
 on [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [1.1.0] - 2026-10-31
+
+Rebuild a VPX with the old VM's identity, and offline LAS activation (Fixed Bandwidth subscription) over NITRO.
+Validated on NetScaler 14.1 builds 73.46 and 73.49 on a standalone ESXi host, including a full rebuild under another
+VM name that kept its offline license.
 
 ### Added
 - `-BiosUuid`: SMBIOS UUID of the new VM (vSphere API, `uuid.action = keep`), refused if another VM still has it.
@@ -14,8 +18,8 @@ on [SemVer](https://semver.org/).
 - `-LasActivate -ActivationFile`: uploads the Citrix Cloud activation file and applies it
   (`apply ns laslicense -fixedBandwidth`); `-Reboot` saves, warm-reboots and shows the licensing mode.
 - `-NsPinnedPublicKey` for the LAS modes (otherwise pinned on first contact with a warning).
-- docs/vmware.md: "Offline LAS activation" and "Rebuild with the same identity" (what binds an activation to a VM,
-  validated on 14.1 build 73.46 / 73.49).
+- docs/vmware.md: "Offline LAS activation" and "Rebuild with the same identity" (what a rebuild needs to keep an
+  offline activation: same MAC on 0/1, same BIOS UUID, full system backup restored, warm reboot from the CLI).
 
 ## [1.0.0] - 2026-10-22
 
@@ -40,4 +44,5 @@ Validated on NetScaler 14.1 build 73.46 with E1000 and VMXNET3, 1 and 2 NICs.
 - `docs/vmware.md`: requirements, what the script does, usage, parameters, notes, screenshots, next steps
   (default SSL profile, HTTPS-only management, CA-signed management certificate)
 
+[1.1.0]: https://github.com/bensplittgerber/netscaler-vpx-deploy/releases/tag/v1.1.0
 [1.0.0]: https://github.com/bensplittgerber/netscaler-vpx-deploy/releases/tag/v1.0.0

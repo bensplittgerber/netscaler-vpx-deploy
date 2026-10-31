@@ -6,7 +6,7 @@ run. Secrets are prompted masked and never written to disk, the ISO or a command
 
 | Hypervisor | Script | Status |
 |---|---|---|
-| VMware ESXi (standalone host, no vCenter) | [`vmware/Deploy-NsVpx.ps1`](vmware/Deploy-NsVpx.ps1) | validated on 14.1 build 73.46 |
+| VMware ESXi (standalone host, no vCenter) | [`vmware/Deploy-NsVpx.ps1`](vmware/Deploy-NsVpx.ps1) | validated on 14.1 builds 73.46 and 73.49 |
 | KVM | - | planned |
 
 ## VMware ESXi

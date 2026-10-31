@@ -24,9 +24,9 @@
     -LasRequest: offline LAS activation request on a running VPX (NITRO), downloaded as <name>_activation_request.tgz.
     -LasActivate: uploads the activation file from Citrix Cloud to /nsconfig/license and applies it (-Reboot: save,
       warm reboot, show the licensing mode).
-    An offline LAS activation only works on the VPX that created the request: it is bound to the request's key pair,
-    which the VPX protects with a secret tied to the VM. A rebuild keeps it only with the same MAC on 0/1, the same
-    BIOS UUID and a restored full system backup (docs/vmware.md, "Rebuild with the same identity").
+    An offline LAS activation only works on the VPX that created the request. A rebuild keeps it only with the same
+    MAC on 0/1, the same BIOS UUID and a restored full system backup (docs/vmware.md, "Rebuild with the same
+    identity").
 
     Prompts (masked, all at the start so the run is unattended): ESXi login; nsroot default password of the image,
     new nsroot password (twice); RPC password with -SetRpcPassword. Passwords stay in memory (SecureString, plain only
@@ -513,7 +513,7 @@ function Invoke-LasActivate {
         $a = Invoke-NsNitro -Session $s -Method POST -Resource 'nslaslicense' -Query 'action=apply' `
             -Body @{ nslaslicense = @{ filename = $name; filelocation = '/nsconfig/license'; fixedbandwidth = $true } }
         if ($a.ErrorCode -ne 0 -and $a.Message -match 'LPEID') {
-            Write-Host ('The activation does not fit this VPX: it belongs to the key pair of the VPX that created the request ' +
+            Write-Host ('The activation does not fit this VPX: it belongs to the VPX that created the request ' +
                 '(other VPX, or a rebuild without the same MAC + BIOS UUID + full backup). Create a new request (-LasRequest).') -ForegroundColor Yellow
         }
         Write-Step "apply ns laslicense -fileName $name -fileLocation /nsconfig/license -fixedBandwidth" $a

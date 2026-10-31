@@ -144,18 +144,17 @@ LAS Activation), over NITRO; the nsroot password is prompted masked.
     -ActivationFile ./NS_<id>_activation.blob.tgz -Reboot -NoProxy
 ```
 
-What to know (14.1 build 73.46 and 73.49):
-- The **request** (`<id>_activation_request.tgz`, or `<host name>_...` with `-UseHostname`) holds JSON with the
-  identifier, the build, a request time and the public key of a **key pair the VPX creates on the first request**
-  (`/nsconfig/license/las_key_pair/`, kept for later requests). The identifier is the SHA-256 of the Host Id (`show
-  ns hardware`, the MAC of interface 0/1) - also with `-UseHostname`, which only changes the name. No secrets in it.
-  The GUI shows an expiry of 7 days for the request.
-- The **activation file** is signed (JWT, RS256, chain up to "Citrix LAS Root CA V1"), not encrypted. It names the
-  identifier, the products and the validity, and carries the request's public key, signed by Citrix.
-- It only applies on the VPX that holds the request's key pair. Elsewhere: `License blob is invalid: blob not
-  applicable for this LPEID`. The VPX also checks the key pair against a secret tied to the VM (`HMAC mismatch -
-  pubkey may be tampered` in `/var/log/ns.log`, then a new key pair) - copying `las_key_pair` to another VM does not
-  work.
+What to know - observed on 14.1 builds 73.46 and 73.49, standalone ESXi, Fixed Bandwidth subscription. This is not
+documented by NetScaler in this form and may change with later builds:
+- The **request** (`<id>_activation_request.tgz`, or `<host name>_...` with `-UseHostname`) contains no secrets: an
+  identifier derived from the Host Id (`show ns hardware`, the MAC of interface 0/1), the build, the request time
+  and the public key of a key pair the VPX creates on its first request (`/nsconfig/license/las_key_pair/`, reused
+  for later requests). `-UseHostname` changes the name shown in Citrix Cloud, not the identifier. The GUI shows an
+  expiry of 7 days for the request.
+- The **activation file** is signed by Citrix and names the identifier, the products and the validity.
+- It applies only on the VPX that created the request. Anywhere else: `License blob is invalid: blob not
+  applicable for this LPEID`. A key pair copied from another VM is not accepted (the VPX creates a new one) - keep
+  the VM itself, or rebuild it as described below.
 - `apply ns laslicense` without `-fixedBandwidth` fails with `Failed to parse las license file`.
 - `show ns laslicense` is ACTIVE right after the import; the licensing mode (`show ns license`) switches to
   "LAS (Fixed Bandwidth)" after a reboot.
@@ -163,15 +162,17 @@ What to know (14.1 build 73.46 and 73.49):
 
 ## Rebuild with the same identity (keeps an offline LAS license)
 
-A rebuilt VPX keeps an offline LAS activation only if the new VM looks like the old one and gets its files back.
-Validated on a standalone host:
+A rebuilt VPX keeps an offline LAS activation only if the new VM has the old VM's identity and gets its files back.
+Results on a standalone host (same builds as above):
 
 | Same MAC on 0/1 | Same BIOS UUID | Restored | Result |
 |---|---|---|---|
-| yes | no | `las_key_pair` only | key pair rejected (HMAC mismatch), activation not applicable |
-| yes | no | full system backup | key pair rejected at boot |
+| yes | no | `las_key_pair` only | not accepted, the activation does not apply |
+| yes | no | full system backup | not accepted, the activation does not apply |
 | yes | yes (same VM name / folder) | full system backup | activation applies, LAS (Fixed Bandwidth) after the reboot |
 | yes | yes (`-BiosUuid`, other VM name / folder) | full system backup | activation applies, LAS (Fixed Bandwidth) after the reboot |
+
+Otherwise create a new request on the rebuilt VPX and activate it in Citrix Cloud.
 
 1. Before removing the old VM: read its identity, and take a **full** system backup after the activation (`create
    system backup <name> -level full`, then copy it off the VPX - it contains private keys, treat it like a PFX).
