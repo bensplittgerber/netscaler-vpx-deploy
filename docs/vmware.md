@@ -170,7 +170,8 @@ Validated on a standalone host:
 |---|---|---|---|
 | yes | no | `las_key_pair` only | key pair rejected (HMAC mismatch), activation not applicable |
 | yes | no | full system backup | key pair rejected at boot |
-| yes | yes | full system backup | activation applies, LAS (Fixed Bandwidth) after the reboot |
+| yes | yes (same VM name / folder) | full system backup | activation applies, LAS (Fixed Bandwidth) after the reboot |
+| yes | yes (`-BiosUuid`, other VM name / folder) | full system backup | activation applies, LAS (Fixed Bandwidth) after the reboot |
 
 1. Before removing the old VM: read its identity, and take a **full** system backup after the activation (`create
    system backup <name> -level full`, then copy it off the VPX - it contains private keys, treat it like a PFX).
@@ -179,7 +180,8 @@ Validated on a standalone host:
    ```
 2. Remove the old VM, deploy the new one with the printed `-MacAddress` / `-BiosUuid` (and the same `-NicCount`).
    A new VM with the same name in the same folder usually gets the same BIOS UUID anyway; `-BiosUuid` makes it
-   explicit.
+   explicit and also works for another VM name (validated). The VPX reads it as `smbios.system.uuid` (byte-swapped
+   first three fields).
 3. Copy the backup to `/var/ns_sys_backup/`, `add system backup <file>`, `restore system backup <file>`, then a
    **warm reboot from the CLI**. Do not power the VM off right after the restore: in the lab that left the VPX
    unconfigured (factory IP) at the next boot.
