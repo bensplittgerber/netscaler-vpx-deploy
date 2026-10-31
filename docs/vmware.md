@@ -104,6 +104,7 @@ configured".
 | `-NumCpu`, `-MemoryGB`, `-NicCount` | 2, 2, 1 | VM size; NICs 0/1, 1/1, 1/2, ... all on `-Network` |
 | `-NicType` | as in the OVF (E1000) | `Vmxnet3` or `E1000` for all NICs (VMXNET3: paravirtual, less host CPU) |
 | `-MacAddress` | ESXi generated | one MAC per NIC, e.g. to keep the MAC of a rebuilt VM (DHCP, firewall, NAT entries) |
+| `-BiosUuid` | ESXi generated | SMBIOS UUID of the VM (`uuid.bios`), e.g. kept from the old VM (`-ShowIdentity`); `.vmx` notation, `8-4-4-4-12` or 32 hex digits |
 | `-SkipNsroot` | off | no password change; do it at the first login or later with `-InitNsroot` (ISO is kept) |
 | `-KeepIso` | off | keep the userdata ISO after a successful run (remove it later with `-Cleanup`) |
 | `-SetRpcPassword` | off | also prompt for an RPC node password (must be the same on both HA nodes) |
@@ -113,7 +114,80 @@ configured".
 
 Other modes: `-ListOvf` (OVFs on all datastores), `-Cleanup` (userdata ISO off the VM and the datastore, for the
 cases where the deploy kept it),
-`-InitNsroot -Nsip ...` (only step 4 against a running VPX, asks for the current and an optional new password).
+`-InitNsroot -Nsip ...` (only step 4 against a running VPX, asks for the current and an optional new password),
+`-ShowIdentity -VmName ...` (MACs and BIOS UUID of an existing VM, see "Rebuild with the same identity"),
+`-LasRequest` / `-LasActivate` (offline LAS activation, see below).
+
+| Parameter (LAS modes) | Default | Meaning |
+|---|---|---|
+| `-Nsip` | - | the running VPX |
+| `-NsPinnedPublicKey` | first contact (warning) | `sha256//...` of the VPX management certificate key, as printed by the deploy |
+| `-UseHostname` | off | `-LasRequest`: name the VPX by its host name in Citrix Cloud (GUI toggle "Use hostname") |
+| `-OutDir` | `.` | `-LasRequest`: where the request `.tgz` goes |
+| `-ActivationFile` | - | `-LasActivate`: the activation file from Citrix Cloud |
+| `-Reboot` | off | `-LasActivate`: save the config, warm reboot, show the licensing mode afterwards |
+| `-NoProxy`, `-WhatIf` | off | as above |
+
+## Offline LAS activation (Fixed Capacity / Fixed Bandwidth subscription)
+
+For a VPX without internet access to the License Activation Service. Same flow as the GUI (License > ADC License >
+LAS Activation), over NITRO; the nsroot password is prompted masked.
+
+```powershell
+# 1. request: show ns licenseactivationdata + download from /nsconfig/license
+./vmware/Deploy-NsVpx.ps1 -LasRequest -Nsip 192.0.2.10 -NsPinnedPublicKey 'sha256//...' -NoProxy
+
+# 2. Citrix Cloud > Licensing > NetScaler licenses > NetScaler ADC: upload the request, download the activation file
+
+# 3. activation: add system file + apply ns laslicense -fixedBandwidth, save, warm reboot, show the result
+./vmware/Deploy-NsVpx.ps1 -LasActivate -Nsip 192.0.2.10 -NsPinnedPublicKey 'sha256//...' `
+    -ActivationFile ./NS_<id>_activation.blob.tgz -Reboot -NoProxy
+```
+
+What to know (14.1 build 73.46 and 73.49):
+- The **request** (`<id>_activation_request.tgz`, or `<host name>_...` with `-UseHostname`) holds JSON with the
+  identifier, the build, a request time and the public key of a **key pair the VPX creates on the first request**
+  (`/nsconfig/license/las_key_pair/`, kept for later requests). The identifier is the SHA-256 of the Host Id (`show
+  ns hardware`, the MAC of interface 0/1) - also with `-UseHostname`, which only changes the name. No secrets in it.
+  The GUI shows an expiry of 7 days for the request.
+- The **activation file** is signed (JWT, RS256, chain up to "Citrix LAS Root CA V1"), not encrypted. It names the
+  identifier, the products and the validity, and carries the request's public key, signed by Citrix.
+- It only applies on the VPX that holds the request's key pair. Elsewhere: `License blob is invalid: blob not
+  applicable for this LPEID`. The VPX also checks the key pair against a secret tied to the VM (`HMAC mismatch -
+  pubkey may be tampered` in `/var/log/ns.log`, then a new key pair) - copying `las_key_pair` to another VM does not
+  work.
+- `apply ns laslicense` without `-fixedBandwidth` fails with `Failed to parse las license file`.
+- `show ns laslicense` is ACTIVE right after the import; the licensing mode (`show ns license`) switches to
+  "LAS (Fixed Bandwidth)" after a reboot.
+- On a licensed VPX a new request also carries the last activation id (renewal / rehost in Citrix Cloud).
+
+## Rebuild with the same identity (keeps an offline LAS license)
+
+A rebuilt VPX keeps an offline LAS activation only if the new VM looks like the old one and gets its files back.
+Validated on a standalone host:
+
+| Same MAC on 0/1 | Same BIOS UUID | Restored | Result |
+|---|---|---|---|
+| yes | no | `las_key_pair` only | key pair rejected (HMAC mismatch), activation not applicable |
+| yes | no | full system backup | key pair rejected at boot |
+| yes | yes | full system backup | activation applies, LAS (Fixed Bandwidth) after the reboot |
+
+1. Before removing the old VM: read its identity, and take a **full** system backup after the activation (`create
+   system backup <name> -level full`, then copy it off the VPX - it contains private keys, treat it like a PFX).
+   ```powershell
+   ./vmware/Deploy-NsVpx.ps1 -EsxHost esx01.example.org -VmName ns01 -ShowIdentity
+   ```
+2. Remove the old VM, deploy the new one with the printed `-MacAddress` / `-BiosUuid` (and the same `-NicCount`).
+   A new VM with the same name in the same folder usually gets the same BIOS UUID anyway; `-BiosUuid` makes it
+   explicit.
+3. Copy the backup to `/var/ns_sys_backup/`, `add system backup <file>`, `restore system backup <file>`, then a
+   **warm reboot from the CLI**. Do not power the VM off right after the restore: in the lab that left the VPX
+   unconfigured (factory IP) at the next boot.
+4. Apply the activation file again (`-LasActivate -Reboot`) unless the restored backup already contains it, and check
+   `show ns laslicense` / `show ns license`.
+
+Two VMs with the same MAC or BIOS UUID must never run at the same time; the deploy refuses a MAC or BIOS UUID that
+another registered VM still has.
 
 ## Notes
 

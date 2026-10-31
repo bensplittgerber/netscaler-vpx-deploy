@@ -7,7 +7,7 @@
 .DESCRIPTION
     Deploy (-OvfPath):
       1. copies the OVF package (.ovf, .mf, disks) from the datastore to a temp folder and imports it with PowerCLI
-         Import-VApp (thin), sets vCPU / memory / NICs / port group, optional static MAC(s)
+         Import-VApp (thin), sets vCPU / memory / NICs / port group, optional static MAC(s) and BIOS UUID
       2. builds a preboot userdata ISO (NSIP, mask, default route, host name, optional SNIP, DNS, NTP, -ExtraConfig
          lines - never secrets), copies it to the VM folder and attaches it as CD
          (NetScaler docs: "Apply NetScaler VPX configurations at the first boot ... on VMware ESX")
@@ -20,6 +20,13 @@
          failure, with -SkipNsroot and with -KeepIso; the run then prints the -Cleanup command.
     -Cleanup: ejects the userdata ISO (or removes the CD drive if the VM is off) and deletes it from the datastore.
     -InitNsroot: step 4 only, against a running VPX. -ListOvf: lists OVFs on all datastores.
+    -ShowIdentity: prints MAC(s) and BIOS UUID of an existing VM as -MacAddress / -BiosUuid for its rebuild.
+    -LasRequest: offline LAS activation request on a running VPX (NITRO), downloaded as <name>_activation_request.tgz.
+    -LasActivate: uploads the activation file from Citrix Cloud to /nsconfig/license and applies it (-Reboot: save,
+      warm reboot, show the licensing mode).
+    An offline LAS activation only works on the VPX that created the request: it is bound to the request's key pair,
+    which the VPX protects with a secret tied to the VM. A rebuild keeps it only with the same MAC on 0/1, the same
+    BIOS UUID and a restored full system backup (docs/vmware.md, "Rebuild with the same identity").
 
     Prompts (masked, all at the start so the run is unattended): ESXi login; nsroot default password of the image,
     new nsroot password (twice); RPC password with -SetRpcPassword. Passwords stay in memory (SecureString, plain only
@@ -40,6 +47,12 @@
     ./Deploy-NsVpx.ps1 -EsxHost esx01.example.org -VmName ns01 -Datastore datastore1 -Cleanup
 .EXAMPLE
     ./Deploy-NsVpx.ps1 -InitNsroot -Nsip 192.0.2.10 -NoProxy
+.EXAMPLE
+    ./Deploy-NsVpx.ps1 -EsxHost esx01.example.org -VmName ns01 -ShowIdentity
+.EXAMPLE
+    ./Deploy-NsVpx.ps1 -LasRequest -Nsip 192.0.2.10 -NsPinnedPublicKey 'sha256//...' -OutDir . -NoProxy
+.EXAMPLE
+    ./Deploy-NsVpx.ps1 -LasActivate -Nsip 192.0.2.10 -ActivationFile ./NS_<id>_activation.blob.tgz -Reboot -NoProxy
 #>
 [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'Deploy')]
 param(
@@ -47,23 +60,31 @@ param(
     [Parameter(ParameterSetName = 'Deploy', Mandatory)][string]$OvfPath,   # '[datastore] folder/file.ovf'
     [Parameter(ParameterSetName = 'Cleanup', Mandatory)][switch]$Cleanup,
     [Parameter(ParameterSetName = 'InitNsroot', Mandatory)][switch]$InitNsroot,
+    [Parameter(ParameterSetName = 'Identity', Mandatory)][switch]$ShowIdentity,
+    [Parameter(ParameterSetName = 'LasRequest', Mandatory)][switch]$LasRequest,
+    [Parameter(ParameterSetName = 'LasActivate', Mandatory)][switch]$LasActivate,
 
     [Parameter(ParameterSetName = 'List', Mandatory)]
     [Parameter(ParameterSetName = 'Deploy', Mandatory)]
-    [Parameter(ParameterSetName = 'Cleanup', Mandatory)][string]$EsxHost,
+    [Parameter(ParameterSetName = 'Cleanup', Mandatory)]
+    [Parameter(ParameterSetName = 'Identity', Mandatory)][string]$EsxHost,
     # 'sha256//<base64 SPKI hash>' of the ESXi host certificate key (see docs/vmware.md). Empty: not checked.
     [Parameter(ParameterSetName = 'List')]
     [Parameter(ParameterSetName = 'Deploy')]
-    [Parameter(ParameterSetName = 'Cleanup')][string]$EsxPinnedPublicKey,
+    [Parameter(ParameterSetName = 'Cleanup')]
+    [Parameter(ParameterSetName = 'Identity')][string]$EsxPinnedPublicKey,
     [Parameter(ParameterSetName = 'Deploy', Mandatory)]
-    [Parameter(ParameterSetName = 'Cleanup', Mandatory)][string]$VmName,
+    [Parameter(ParameterSetName = 'Cleanup', Mandatory)]
+    [Parameter(ParameterSetName = 'Identity', Mandatory)][string]$VmName,
     # datastore for the VM and the userdata ISO (the OVF may sit on another one)
     [Parameter(ParameterSetName = 'Deploy', Mandatory)]
     [Parameter(ParameterSetName = 'Cleanup', Mandatory)][string]$Datastore,
     [Parameter(ParameterSetName = 'Deploy')][string]$Network = 'VM Network',
 
     [Parameter(ParameterSetName = 'Deploy', Mandatory)]
-    [Parameter(ParameterSetName = 'InitNsroot', Mandatory)][string]$Nsip,
+    [Parameter(ParameterSetName = 'InitNsroot', Mandatory)]
+    [Parameter(ParameterSetName = 'LasRequest', Mandatory)]
+    [Parameter(ParameterSetName = 'LasActivate', Mandatory)][string]$Nsip,
     [Parameter(ParameterSetName = 'Deploy')][string]$Netmask = '255.255.255.0',
     [Parameter(ParameterSetName = 'Deploy', Mandatory)][string]$Gateway,
     [Parameter(ParameterSetName = 'Deploy')][string]$HostName,             # empty: -VmName
@@ -83,6 +104,9 @@ param(
     # optional static MAC per NIC, in order (rebuild with the MAC the firewall / DHCP / NAT entries expect).
     # Empty: ESXi generates them.
     [Parameter(ParameterSetName = 'Deploy')][string[]]$MacAddress,
+    # optional SMBIOS UUID of the VM (VMware 'uuid.bios'), e.g. kept from the old VM (-ShowIdentity). Formats:
+    # '56 4d xx .. xx-xx .. xx' (.vmx), '564dxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx' or 32 hex digits. Empty: ESXi generates it.
+    [Parameter(ParameterSetName = 'Deploy')][string]$BiosUuid,
 
     [Parameter(ParameterSetName = 'Deploy')][switch]$SkipNsroot,           # leave the password change to the first login
     [Parameter(ParameterSetName = 'Deploy')][switch]$KeepIso,              # do not remove the userdata ISO after a successful run
@@ -93,7 +117,22 @@ param(
     [Parameter(ParameterSetName = 'Deploy')]
     [Parameter(ParameterSetName = 'InitNsroot')][string[]]$DisableMode = @('MBF'),     # @() = leave as is
     [Parameter(ParameterSetName = 'Deploy')]
-    [Parameter(ParameterSetName = 'InitNsroot')][switch]$NoProxy
+    [Parameter(ParameterSetName = 'InitNsroot')]
+    [Parameter(ParameterSetName = 'LasRequest')]
+    [Parameter(ParameterSetName = 'LasActivate')][switch]$NoProxy,
+
+    # LAS modes: 'sha256//...' of the VPX management certificate key (printed by the deploy). Empty: pinned on first
+    # contact (with a warning).
+    [Parameter(ParameterSetName = 'LasRequest')]
+    [Parameter(ParameterSetName = 'LasActivate')][string]$NsPinnedPublicKey,
+    # -LasRequest: identify the VPX by its host name instead of the system identifier (GUI toggle "Use hostname").
+    # The request still carries the MAC-based identifier.
+    [Parameter(ParameterSetName = 'LasRequest')][switch]$UseHostname,
+    [Parameter(ParameterSetName = 'LasRequest')][string]$OutDir = '.',
+    # -LasActivate: the activation file from Citrix Cloud (NS_<id or host name>_activation.blob.tgz)
+    [Parameter(ParameterSetName = 'LasActivate', Mandatory)][string]$ActivationFile,
+    # -LasActivate: save the config, warm reboot (the licensing mode changes only after a reboot), show the result
+    [Parameter(ParameterSetName = 'LasActivate')][switch]$Reboot
 )
 $ErrorActionPreference = 'Stop'
 # -WhatIf = dry run of the whole deployment (shows the userdata), not passed down to PowerCLI / PSDrive cmdlets
@@ -182,6 +221,12 @@ if ($MacAddress) {
     foreach ($m in $MacAddress) { if ($m -notmatch '^([0-9a-f]{2}:){5}[0-9a-f]{2}$') { throw "-MacAddress '$m' is not a MAC address." } }
     if ($MacAddress.Count -ne $NicCount) { throw "$($MacAddress.Count) MAC(s) for $NicCount NIC(s) - one MAC per NIC." }
 }
+if ($BiosUuid) {
+    # any of the three spellings -> 8-4-4-4-12 (vSphere API format of config.uuid)
+    $hex = ($BiosUuid -replace '[\s-]', '').ToLower()
+    if ($hex -notmatch '^[0-9a-f]{32}$') { throw "-BiosUuid '$BiosUuid' is not a UUID (32 hex digits)." }
+    $BiosUuid = '{0}-{1}-{2}-{3}-{4}' -f $hex.Substring(0, 8), $hex.Substring(8, 4), $hex.Substring(12, 4), $hex.Substring(16, 4), $hex.Substring(20)
+}
 
 function Set-VmStaticMac($Vm, [string[]]$Mac, [string]$WorkDir) {
     # 00:50:56:00-3f:xx:xx = VMware manual range -> API. Anything else (e.g. 00:0c:29 = auto-generated, kept from an
@@ -214,6 +259,26 @@ function Set-VmStaticMac($Vm, [string[]]$Mac, [string]$WorkDir) {
     $vmHost = $Vm.VMHost
     Remove-VM $Vm -Confirm:$false                                      # unregister only, files stay
     New-VM -VMFilePath $vmxPath -VMHost $vmHost
+}
+
+function Set-VmBiosUuid($Vm, [string]$Uuid) {
+    # SMBIOS UUID (uuid.bios) through the vSphere API. uuid.action = keep: no "moved or copied?" question at power-on
+    # (uuid.location no longer matches), and ESXi does not generate a new UUID.
+    $spec = New-Object VMware.Vim.VirtualMachineConfigSpec
+    $spec.Uuid = $Uuid
+    $spec.ExtraConfig = @(New-Object VMware.Vim.OptionValue -Property @{ Key = 'uuid.action'; Value = 'keep' })
+    $Vm.ExtensionData.ReconfigVM($spec)
+    $Vm = Get-VM -Id $Vm.Id
+    if ($Vm.ExtensionData.Config.Uuid -ne $Uuid) { throw "BIOS UUID is $($Vm.ExtensionData.Config.Uuid), expected $Uuid." }
+    Write-Host "BIOS UUID: $Uuid" -ForegroundColor DarkGray
+    $Vm
+}
+
+function Format-VmxUuid([string]$Uuid) {
+    # 8-4-4-4-12 -> '56 4d .. ..-.. ..' as in the .vmx (uuid.bios)
+    $h = $Uuid -replace '-', ''
+    $b = for ($i = 0; $i -lt 32; $i += 2) { $h.Substring($i, 2) }
+    ($b[0..7] -join ' ') + '-' + ($b[8..15] -join ' ')
 }
 
 function New-UserdataIso([string]$Dir, [string]$Out) {
@@ -383,9 +448,114 @@ function Remove-UserdataIso {
     if (Test-Path "ds:\$VmName\$isoName") { Remove-Item "ds:\$VmName\$isoName"; Write-Host "$isoName deleted from the datastore." -ForegroundColor Green }
 }
 
+function Open-NsSession([string]$Ip) {
+    # pinned NITRO session for the LAS modes: -NsPinnedPublicKey, else the key of the first contact (warning)
+    $pin = $NsPinnedPublicKey
+    if (-not $pin) {
+        $pin = Get-KeyPin $Ip
+        Write-Warning "management certificate of $Ip not checked - pinned on first contact: $pin (pass -NsPinnedPublicKey)."
+    }
+    # Password stays in memory (SecureString) for the login after -Reboot
+    $s = @{ Base = "https://$Ip/nitro/v1/config"; Client = [NsVpxDeploy.Pin]::NewClient($pin, $NoProxy.IsPresent); Cookie = $null
+            Password = (Read-Secret 'nsroot password') }
+    Connect-NsNitro $s $s.Password
+    $s
+}
+
+function Show-LasStatus([hashtable]$Session) {
+    $las = @((Invoke-NsNitro -Session $Session -Method GET -Resource 'nslaslicense').Data.nslaslicense)[0]
+    $lic = @((Invoke-NsNitro -Session $Session -Method GET -Resource 'nslicense').Data.nslicense)[0]
+    Write-Host "LAS status: $($las.status), days to expiration: $($las.daystoexpiration)" -ForegroundColor Cyan
+    Write-Host "Licensing mode: $($lic.licensingmode), model ID: $($lic.modelid)" -ForegroundColor Cyan
+    $las
+}
+
+function Invoke-LasRequest {
+    # = CLI 'show ns licenseactivationdata [-useHostname]': creates the request (and on the first call the VPX's
+    # activation key pair) under /nsconfig/license; a second call keeps the key pair, only the request time changes.
+    $s = Open-NsSession $Nsip
+    try {
+        $r = Invoke-NsNitro -Session $s -Method GET -Resource 'nslicenseactivationdata' -Query $(if ($UseHostname) { 'args=usehostname:true' })
+        Write-Step "show ns licenseactivationdata$(if ($UseHostname) { ' -useHostname' })" $r
+        $name = @($r.Data.nslicenseactivationdata)[0].filename
+        if (-not $name) { throw "no file name in the NITRO answer: $($r.Data | ConvertTo-Json -Depth 5 -Compress)" }
+        $f = Invoke-NsNitro -Session $s -Method GET -Resource "systemfile/$([uri]::EscapeDataString($name))" -Query 'args=filelocation:%2Fnsconfig%2Flicense'
+        Write-Step "download /nsconfig/license/$name" $f
+        $out = Join-Path (Resolve-Path $OutDir) $name
+        [IO.File]::WriteAllBytes($out, [Convert]::FromBase64String(@($f.Data.systemfile)[0].filecontent))
+        Write-Host "saved $out ($((Get-Item $out).Length) bytes, sha256 $((Get-FileHash $out).Hash.ToLower()))" -ForegroundColor Green
+        # the request is public data (no secrets): show what Citrix Cloud will see
+        try {
+            $j = tar -xzOf $out ns_offline_activation_request.json | ConvertFrom-Json
+            Write-Host "request: hostname $($j.hostname), id $($j.lsguid), build $($j.lsbuild), last activation '$($j.renewalinput.lastactivationid)'"
+        } catch { }
+        Write-Host 'Next: upload it in Citrix Cloud (Licensing > NetScaler licenses > NetScaler ADC), then -LasActivate with the activation file.' -ForegroundColor Green
+    }
+    finally { Disconnect-NsNitro $s; $s.Client.Dispose() }
+}
+
+function Invoke-LasActivate {
+    # = GUI "Upload File": add system file + apply ns laslicense -fixedBandwidth (without it: "Failed to parse")
+    $file = Get-Item $ActivationFile
+    $name = $file.Name
+    $s = Open-NsSession $Nsip
+    try {
+        $body = @{ systemfile = @{ filename = $name; filelocation = '/nsconfig/license'
+                                   filecontent = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file.FullName)); fileencoding = 'BASE64' } }
+        $r = Invoke-NsNitro -Session $s -Method POST -Resource 'systemfile' -Body $body
+        if ($r.ErrorCode -ne 0 -and $r.Message -match 'exist') {
+            # same name from an earlier try -> replace
+            Write-Step "delete old /nsconfig/license/$name" (Invoke-NsNitro -Session $s -Method DELETE `
+                -Resource "systemfile/$([uri]::EscapeDataString($name))" -Query 'args=filelocation:%2Fnsconfig%2Flicense')
+            $r = Invoke-NsNitro -Session $s -Method POST -Resource 'systemfile' -Body $body
+        }
+        Write-Step "add system file $name -fileLocation /nsconfig/license" $r
+        $a = Invoke-NsNitro -Session $s -Method POST -Resource 'nslaslicense' -Query 'action=apply' `
+            -Body @{ nslaslicense = @{ filename = $name; filelocation = '/nsconfig/license'; fixedbandwidth = $true } }
+        if ($a.ErrorCode -ne 0 -and $a.Message -match 'LPEID') {
+            Write-Host ('The activation does not fit this VPX: it belongs to the key pair of the VPX that created the request ' +
+                '(other VPX, or a rebuild without the same MAC + BIOS UUID + full backup). Create a new request (-LasRequest).') -ForegroundColor Yellow
+        }
+        Write-Step "apply ns laslicense -fileName $name -fileLocation /nsconfig/license -fixedBandwidth" $a
+        [void](Show-LasStatus $s)
+        if (-not $Reboot) {
+            Write-Host 'The licensing mode changes after a reboot: save ns config + reboot -warm (or run again with -Reboot).' -ForegroundColor Yellow
+            return
+        }
+        Write-Step 'save ns config' (Invoke-NsNitro -Session $s -Method POST -Resource 'nsconfig' -Query 'action=save' -Body @{ nsconfig = @{} })
+        # the VPX drops the connection while it restarts -> no answer expected
+        try { [void](Invoke-NsNitro -Session $s -Method POST -Resource 'reboot' -Body @{ reboot = @{ warm = $true } }) } catch { }
+        $s.Cookie = $null
+        Write-Host 'warm reboot ...' -ForegroundColor Cyan
+
+        # wait until 443 is gone and NITRO takes a login again, then show the licensing mode
+        $deadline = (Get-Date).AddMinutes(2)
+        while ((Test-Connection $Nsip -TcpPort 443 -Quiet) -and (Get-Date) -lt $deadline) { Start-Sleep 5 }
+        $deadline = (Get-Date).AddMinutes(10)
+        while ($true) {
+            Start-Sleep 20
+            try { Connect-NsNitro $s $s.Password; break }
+            catch { if ((Get-Date) -gt $deadline) { throw "NITRO on $Nsip not back after 10 min: $($_.Exception.Message)" } }
+        }
+        [void](Show-LasStatus $s)
+    }
+    finally { Disconnect-NsNitro $s; $s.Client.Dispose() }
+}
+
 if ($InitNsroot) {
     if ($dryRun) { Write-Host "WhatIf: would log in to https://$Nsip as nsroot and change the password via NITRO." -ForegroundColor Yellow; return }
     [void](Initialize-Nsroot -Ip $Nsip -Secrets (Read-NsrootSecrets -Existing))
+    return
+}
+if ($LasRequest) {
+    if ($dryRun) { Write-Host "WhatIf: would create the LAS offline activation request on $Nsip$(if ($UseHostname) { ' (host name)' }) and download it to $OutDir." -ForegroundColor Yellow; return }
+    Invoke-LasRequest
+    return
+}
+if ($LasActivate) {
+    if (-not (Test-Path $ActivationFile)) { throw "$ActivationFile not found." }
+    if ($dryRun) { Write-Host "WhatIf: would upload $ActivationFile to $Nsip`:/nsconfig/license and apply it (-fixedBandwidth)$(if ($Reboot) { ', save + warm reboot' })." -ForegroundColor Yellow; return }
+    Invoke-LasActivate
     return
 }
 
@@ -418,6 +588,17 @@ try {
         return
     }
 
+    if ($ShowIdentity) {
+        # read BEFORE removing a VM whose rebuild must keep MAC / BIOS UUID (offline LAS license, DHCP, NAT)
+        $vm = Get-VM $VmName
+        $mac = @(Get-NetworkAdapter -VM $vm | Sort-Object Name | ForEach-Object MacAddress)
+        $uuid = $vm.ExtensionData.Config.Uuid
+        Write-Host "$VmName  MAC (0/1, 1/1, ...): $($mac -join ', ')"
+        Write-Host "$VmName  BIOS UUID: $uuid  (.vmx: $(Format-VmxUuid $uuid))"
+        Write-Host "Rebuild parameters: -NicCount $($mac.Count) -MacAddress $(($mac | ForEach-Object { "'$_'" }) -join ',') -BiosUuid '$uuid'" -ForegroundColor Green
+        return
+    }
+
     $ds = Get-Datastore $Datastore
     New-PSDrive -Name ds -PSProvider VimDatastore -Root '\' -Location $ds | Out-Null
 
@@ -434,6 +615,11 @@ try {
         if ($dup) { throw "MAC $($dup[0].MacAddress) is still used by VM $($dup[0].Parent.Name) - remove that VM first." }
         Write-Host "MAC: $($MacAddress -join ', ')" -ForegroundColor Cyan
     } else { Write-Host 'MAC: generated by ESXi' -ForegroundColor DarkGray }
+    if ($BiosUuid) {
+        $dup = Get-VM | Where-Object { $_.ExtensionData.Config.Uuid -eq $BiosUuid }
+        if ($dup) { throw "BIOS UUID $BiosUuid is still used by VM $($dup[0].Name) - remove that VM first." }
+        Write-Host "BIOS UUID: $BiosUuid ($(Format-VmxUuid $BiosUuid))" -ForegroundColor Cyan
+    }
     foreach ($ip in @($Nsip, $Snip) | Where-Object { $_ }) {
         if (Test-Connection $ip -Count 2 -TimeoutSeconds 1 -Quiet) { throw "$ip answers ping - address in use (old VM still running?)." }
     }
@@ -475,7 +661,7 @@ $(($cfg | ForEach-Object { "        $_" }) -join "`n")
 </NS-PRE-BOOT-CONFIG>
 "@
     Write-Host "userdata:`n$userdata" -ForegroundColor DarkGray
-    if ($dryRun) { Write-Host "WhatIf: would import $OvfPath as $VmName on $Datastore ($NumCpu vCPU, $MemoryGB GB, $NicCount NIC(s)$(if ($NicType) { " $NicType" }) on $Network), attach $isoName, power on$(if (-not $SkipNsroot) { ", change the nsroot password via NITRO$(if (-not $KeepIso) { ', remove the ISO' })" })." -ForegroundColor Yellow; return }
+    if ($dryRun) { Write-Host "WhatIf: would import $OvfPath as $VmName on $Datastore ($NumCpu vCPU, $MemoryGB GB, $NicCount NIC(s)$(if ($NicType) { " $NicType" }) on $Network$(if ($BiosUuid) { ", BIOS UUID $BiosUuid" })), attach $isoName, power on$(if (-not $SkipNsroot) { ", change the nsroot password via NITRO$(if (-not $KeepIso) { ', remove the ISO' })" })." -ForegroundColor Yellow; return }
     $secrets = if (-not $SkipNsroot) { Read-NsrootSecrets }
 
     $work = Join-Path ([IO.Path]::GetTempPath()) "nsvpx-$(Get-Date -f yyyyMMddHHmmss)"
@@ -507,6 +693,7 @@ $(($cfg | ForEach-Object { "        $_" }) -join "`n")
         }
         Write-Host "NICs: $NicCount x $type" -ForegroundColor DarkGray
         if ($MacAddress) { $vm = Set-VmStaticMac -Vm $vm -Mac $MacAddress -WorkDir $work }
+        if ($BiosUuid) { $vm = Set-VmBiosUuid -Vm $vm -Uuid $BiosUuid }
         Get-NetworkAdapter -VM $vm | Set-NetworkAdapter -NetworkName $Network -StartConnected:$true -Confirm:$false | Out-Null
 
         # --- userdata ISO -> datastore -> CD drive ---------------------------------------------------------------

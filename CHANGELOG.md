@@ -3,6 +3,20 @@
 All notable changes to this project. Format based on [Keep a Changelog](https://keepachangelog.com/), versioning based
 on [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- `-BiosUuid`: SMBIOS UUID of the new VM (vSphere API, `uuid.action = keep`), refused if another VM still has it.
+  Together with `-MacAddress` a rebuilt VM keeps the identity an offline LAS license depends on.
+- `-ShowIdentity -VmName`: prints MACs and BIOS UUID of an existing VM as ready-made rebuild parameters.
+- `-LasRequest`: offline LAS activation request via NITRO (`show ns licenseactivationdata`, optional
+  `-UseHostname`), downloaded from `/nsconfig/license`; shows host name, identifier and build from the request.
+- `-LasActivate -ActivationFile`: uploads the Citrix Cloud activation file and applies it
+  (`apply ns laslicense -fixedBandwidth`); `-Reboot` saves, warm-reboots and shows the licensing mode.
+- `-NsPinnedPublicKey` for the LAS modes (otherwise pinned on first contact with a warning).
+- docs/vmware.md: "Offline LAS activation" and "Rebuild with the same identity" (what binds an activation to a VM,
+  validated on 14.1 build 73.46 / 73.49).
+
 ## [1.0.0] - 2026-10-22
 
 First release: unattended NetScaler VPX deployment on a standalone VMware ESXi host (no vCenter, no console clicks).

@@ -34,6 +34,8 @@ In short:
   MAC-based forwarding switched off (the userdata `disable` lines do not stick on 14.1), config saved
 - userdata ISO removed automatically after success (kept on failure, `-SkipNsroot`, `-KeepIso`)
 - optional ESXi host key check (`-EsxPinnedPublicKey`), dry run (`-WhatIf`), manual ISO cleanup (`-Cleanup`)
+- rebuild with the old VM's identity (`-ShowIdentity`, `-MacAddress`, `-BiosUuid`) and **offline LAS activation**
+  over NITRO (`-LasRequest`, `-LasActivate`) - see [docs/vmware.md](docs/vmware.md)
 
 ## Requirements
 
