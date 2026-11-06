@@ -171,8 +171,18 @@ Results on a standalone host (same builds as above):
 | yes | no | full system backup | not accepted, the activation does not apply |
 | yes | yes (same VM name / folder) | full system backup | activation applies, LAS (Fixed Bandwidth) after the reboot |
 | yes | yes (`-BiosUuid`, other VM name / folder) | full system backup | activation applies, LAS (Fixed Bandwidth) after the reboot |
+| yes (KVM, same NIC order) | yes (KVM SMBIOS UUID + serial, also with the VMware manufacturer / product strings) | full system backup | **not accepted**: ESXi -> KVM move, see below |
 
 Otherwise create a new request on the rebuilt VPX and activate it in Citrix Cloud.
+
+**Moving to another hypervisor** does not keep the activation. This was tested ESXi -> KVM on the same build: same
+MACs, SMBIOS UUID and serial (and in a second run the VMware manufacturer / product strings), full system backup and
+warm reboot. The VPX logs `HMAC mismatch - pubkey may be tampered`, creates a new LAS key pair and drops to Express.
+The VPX's platform ID stays the KVM one (450070 instead of 450010 on ESXi) whatever the SMBIOS strings say, and the
+license check depends on it. Citrix documents no hypervisor binding, but the VPX enforces one. Path: restore the
+backup on the new VPX, create a new request there (`-LasRequest`), activate it in Citrix Cloud (`-LasActivate`).
+Keeping the same MAC on 0/1 still helps, because the VPX then keeps the same deployment entry in Citrix Cloud.
+Rollback works: the original VM, powered on again, still has its active license.
 
 1. Before removing the old VM: read its identity, and take a **full** system backup after the activation (`create
    system backup <name> -level full`, then copy it off the VPX - it contains private keys, treat it like a PFX).

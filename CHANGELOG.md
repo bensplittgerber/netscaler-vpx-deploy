@@ -3,6 +3,15 @@
 All notable changes to this project. Format based on [Keep a Changelog](https://keepachangelog.com/), versioning based
 on [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Documentation
+- README: KVM status changed from "planned" to "lab-tested, script not published yet", with the KVM lab results
+  (userdata ISO on KVM, cpuyield, ISO eject).
+- docs/vmware.md "Rebuild with the same identity": an offline LAS activation does not survive an ESXi -> KVM move
+  (HMAC mismatch, platform ID 450010 vs 450070), even with the same MACs, SMBIOS UUID/serial and a full system
+  backup. Path: new request on the KVM VPX.
+
 ## [1.1.0] - 2026-10-31
 
 Rebuild a VPX with the old VM's identity, and offline LAS activation (Fixed Bandwidth subscription) over NITRO.

@@ -7,7 +7,7 @@ run. Secrets are prompted masked and never written to disk, the ISO or a command
 | Hypervisor | Script | Status |
 |---|---|---|
 | VMware ESXi (standalone host, no vCenter) | [`vmware/Deploy-NsVpx.ps1`](vmware/Deploy-NsVpx.ps1) | validated on 14.1 builds 73.46 and 73.49 |
-| KVM | - | planned |
+| KVM (libvirt) | - | lab-tested on 14.1-73.49 (see [KVM](#kvm)), script not published yet |
 
 ## VMware ESXi
 
@@ -36,6 +36,19 @@ In short:
 - optional ESXi host key check (`-EsxPinnedPublicKey`), dry run (`-WhatIf`), manual ISO cleanup (`-Cleanup`)
 - rebuild with the old VM's identity (`-ShowIdentity`, `-MacAddress`, `-BiosUuid`) and **offline LAS activation**
   over NITRO (`-LasRequest`, `-LasActivate`) - see [docs/vmware.md](docs/vmware.md)
+
+## KVM
+
+The KVM path has been tested in a lab with libvirt and NetScaler 14.1-73.49, but the script is not in this repository
+yet. Lab results so far:
+- The same first-boot **userdata ISO** works on KVM: a file named exactly `userdata`, attached as an IDE CD-ROM, with
+  a virtio disk and a virtio NIC on a Linux bridge. NSIP, route and host name are applied at the first boot.
+- `set ns vpxparam -cpuyield YES` in the userdata sticks (needed when the host also runs other workloads). A
+  `restore system backup` sets it back to DEFAULT.
+- The userdata ISO is removed in the same way as on ESXi. A running VM gets an eject and keeps the empty IDE drive,
+  because IDE cannot be hot-unplugged. A VM that is off loses the drive.
+- An offline LAS activation does **not** move from ESXi to KVM, see
+  [Rebuild with the same identity](docs/vmware.md#rebuild-with-the-same-identity-keeps-an-offline-las-license).
 
 ## Requirements
 
